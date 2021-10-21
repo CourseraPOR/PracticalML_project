@@ -1,0 +1,434 @@
+---
+title: "Practical Machine Learning course project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(caret)
+require(formattable)
+require(tictoc)
+
+## clean up
+rm(list=ls())
+
+set.seed(12345)
+```
+  
+### **Background**  
+  
+Taken from: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har  
+  
+In this work (see the paper) we first define quality of execution and investigate three aspects that pertain to qualitative activity recognition: the problem of specifying correct execution, the automatic and robust detection of execution mistakes, and how to provide feedback on the quality of execution to the user. We tried out an on-body sensing approach (dataset here), but also an "ambient sensing approach" (by using Microsoft Kinect - dataset still unavailable)
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions:  
+* exactly according to the specification (Class A),  
+
+* throwing the elbows to the front (Class B),  
+
+* lifting the dumbbell only halfway (Class C),  
+
+* lowering the dumbbell only halfway (Class D)  
+
+* and throwing the hips to the front (Class E).  
+
+
+
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. Participants were supervised by an experienced weight lifter to make sure the execution complied to the manner they were supposed to simulate. The exercises were performed by six male participants aged between 20-28 years, with little weight lifting experience. We made sure that all participants could easily simulate the mistakes in a safe and controlled manner by using a relatively light dumbbell (1.25kg).  
+
+
+  
+### **Objective**  
+  
+* Predict the manner in which subjects exercise (denoted by the *classe* variable in the dataset).  
+
+  
+* Estimate the out of sample error rate.  
+  
+  
+  
+### **Assumptions**  
+  
+  
+Model accuracy is more important than interpretability/explainability.  
+  
+Time taken to create model is not important - a computationally-intensive solution is acceptable.  
+  
+### **Approach**  
+  
+* Data exploration and preprocessing:  
+
+** Check whether outcomes are balanced in dataset.  
+
+** Exclude features with many values missing.  
+
+** Exclude features with near-zero variability.  
+
+** Derive principal components for numeric variables to:  
+*** reduce number of features, and  
+*** remove multicollinerity (correlations between variables)  
+  
+* Model building:  
+  
+** Split training set into training and validation sets  
+
+** Create multiple models to predict *classe* using training set  
+*** Use repeated cross-validation (5 repeats of 5-fold cross-validation)  
+
+** Create a stacked (ensemble) model that incorporates all models  
+  
+* Model evaluation:  
+
+** Use stacked model to make predictions on validation set  
+
+** Estimate out of sample accuracy based on predictions against validation set  
+  
+* Prediction on test set (once only):  
+
+** Load test data  
+
+** Preprocess test data in same way as training data  
+
+** Make predictions on test data using each model fit  
+
+** Combine predictions using the combined model fit  
+
+### **Load data**  
+  
+  
+```{r load training set}
+training <- read.csv(file = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",stringsAsFactors = TRUE,na.strings=c("","NA"))
+
+
+
+```
+  
+We have many more observations in the training set (`r nrow(training)`) than features (`r ncol(training)-1`).  
+  
+We have sufficient observations that we can use a subset of the training set as a "validation set" that we can use to get estimates of out-of-sample error.  
+  
+We have a mix of character and numeric variables.  
+  
+Many columns have many missing values - the distribution of proportion of missing values is very binary - columns either have no missing values, or almost all missing values.  
+  
+We will omit columns with >90% of values missing.  
+
+```{r omit columns with many missing values}
+
+## what proportion of training set is NA?
+sum(is.na(training))/(sum(!is.na(training))+sum(is.na(training)))
+
+## what is the distribution of proportion of missing values?
+qplot(colMeans(is.na(training)))
+
+training <- training[ ,which(colMeans(!is.na(training)) > 0.9)]
+
+dim(training[complete.cases(training), ])
+
+```
+
+  
+Now we have data with no missing values, no imputation required.  
+  
+Users and outcomes (*classe*) are well balanced across observations in the training set.  
+  
+  
+```{r explore training data}
+
+qplot(training$classe)  
+
+qplot(training$user_name)
+
+```
+  
+*user_name* values are well-balaned. *classe* values are slightly skewed towards "A", but we will consider the data to be sufficiently balanced that we can take a random sample when creating the validation set.  
+  
+  
+  
+```{r omit columns that have very little variability}
+
+## identify which variables in the training set have very little variability
+nzv <- nearZeroVar(training, saveMetrics = TRUE) 
+
+nearZeroVar(training)
+
+## omit columns with near zero variance
+training <- training[ , -nearZeroVar(training)]
+
+```
+  
+Column 6 has near-zero variance - we will omit this feature from subsequent analysis.  
+
+  
+We will assume that the timestamp data are not important for predicting *classe* and omit those columns from the dataset.  
+  
+  
+```{r omit timestamp columns}
+
+timestamp_names <- grep(pattern = "timestamp", x=names(training), ignore.case = T, value = T)
+
+training <- dplyr::select(training, -timestamp_names)
+```
+
+  
+### **Look for correlations between variables**  
+
+  
+```{r look for correlations between variables}
+## which columns are numeric?
+num_cols <- unlist(lapply(training, is.numeric))         # Identify numeric columns
+
+## how many numeric columns are there?
+sum(num_cols==TRUE)
+
+## measure correlation between each numeric variable
+M <- abs(cor(training[, num_cols])) 
+## set diagonals (correlation between each variable and itself) to zero
+diag(M) <- 0   
+## identify which variables are correlated with each other
+corrDF <- as.data.frame(which(M > 0.8, arr.ind = TRUE))
+corrDF
+
+## which columns are correlated with 1 or more other columns?
+unique(corrDF$col)
+## how many columns are correlated with 1 or more other columns?
+length(unique(corrDF$col))
+
+```
+  
+`r length(unique(corrDF$col))` of the `r sum(num_cols==TRUE)` numeric variables are strongly correlated with one or more other numeric variables. This means that linear models (e.g. LDA, lm and glm) may perform poorly.  
+  
+We will calculate principal components for the numeric columns in order to reduce the number of features (to reduce computational requirements when building models) and this eliminate multicollinearity.  
+  
+
+### **Derive principal components for numeric variables**  
+  
+```{r calculate principal components}
+
+## subset and retain only numeric columns
+training_numeric <- training[, num_cols]
+
+## scale and centre values
+training_numeric_scaled <- scale(training_numeric, center = TRUE, scale = TRUE)
+
+## derive principal components
+# note, data are already scaled and centred
+training_PC <- prcomp(training_numeric_scaled, scale. = FALSE, center = FALSE) 
+
+## are principal comonents 1 and 2 sufficient to explain most of variability?
+plot(training_PC$x[,1], training_PC$x[, 2], col=training$classe, xlab="PC1", ylab="PC2")
+
+## get summary of importance of principal components
+summary(training_PC)
+
+
+# Variability of each principal component: pr.var
+pr.var <- training_PC$sdev^2
+
+# Variance explained by each principal component: pve
+pve <- pr.var / sum(pr.var)
+# pve
+
+# Plot cumulative proportion of variance explained
+plot(cumsum(pve), xlab = "Principal Component",
+     ylab = "Cumulative Proportion of Variance Explained",
+     ylim = c(0, 1), type = "b")
+
+
+## get number of principal components needed to explain 95% of variance
+numPC <- length(which(cumsum(pve) <0.95))
+
+## create a model that we can apply to both training and test sets to get principal components 
+preProc <- preProcess(training_numeric, method = "pca", pcaComp = numPC) 
+
+
+## pass that preProc object to the entire training set to get the categorical variables plus the relevant principal components for the numeric variables
+training_PC <- predict(preProc, training) 
+
+## check features present in training_PC
+names(training_PC)
+
+```
+
+The first `r numPC` principal components explain 95% of the variance in the training set - we will use these principal components to create models.  
+  
+
+### **Split training data into training and validation sets**  
+  
+  
+```{r split training data into training and validation sets}
+
+
+## check dimensions of training_PC
+dim(training_PC)
+
+## split into 80% that will stay in training, 20% will go into validation
+inTrain <- createDataPartition(y=training$classe,p=0.80, list = FALSE) 
+
+## create the validation set
+validation_PC <- training_PC[-inTrain,]		##create a validation set
+## check dimensions
+dim(validation_PC)
+
+## now subset the training set
+training_PC <- training_PC[inTrain,]		      ##subset the training set
+## check dimensions
+dim(training_PC)
+
+```
+
+### **Train prediction models**  
+  
+We will create each of multinomial, classification tree, lda, random forest and boosted tree models.  
+
+
+  
+```{r build models}
+
+## set up training control options for repeated cross-validation ...
+fit.control <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+
+## build multinomial logistic regression model
+tic("fit multinom model to training_PC")
+modFit_multinom <- train(classe ~ ., data=training_PC, method="multinom", trControl = fit.control, trace = FALSE)
+toc()
+
+tic("fit decision tree model to training_PC")
+modFit_tree <- train(classe ~ ., data=training_PC, method="rpart", trControl = fit.control)
+toc()
+
+tic("fit lda model to training_PC")
+modFit_lda <- train(classe ~ ., data=training_PC, method="lda", trControl = fit.control)
+toc()
+
+## random forest takes long time to run...
+tic("fit rf model to training_PC")
+modFit_rf <- train(classe ~ ., data=training_PC, method="rf", trControl = fit.control)
+toc()
+
+## boosted tree model
+tic("fit gbm model to training_PC")
+modFit_gbm <- train(classe ~ ., data=training_PC, method="gbm", trControl = fit.control, verbose = FALSE)
+toc()
+
+```
+
+
+  
+### **Predict against validation set**  
+  
+Make predictions against validation set and estimate (out-of-sample) accuracy for each.  
+  
+  
+  
+```{r predict against validation set and measure accuracy}
+
+## make predictions on validation set using each model
+pred_multinom <- predict(modFit_multinom, validation_PC)
+## check accuracy
+confusionMatrix(pred_multinom, validation_PC$classe)$overall
+
+pred_tree <- predict(modFit_tree, validation_PC)
+confusionMatrix(pred_tree, validation_PC$classe)$overall
+
+pred_lda <- predict(modFit_lda, validation_PC)
+confusionMatrix(pred_lda, validation_PC$classe)$overall
+
+pred_rf <- predict(modFit_rf, validation_PC)
+confusionMatrix(pred_rf, validation_PC$classe)$overall
+
+pred_gbm <- predict(modFit_gbm, validation_PC)
+confusionMatrix(pred_gbm, validation_PC$classe)$overall
+```
+
+  
+### **Stack models**  
+  
+  
+Stack the individual models to make an ensemble predictor and measure accuracy.  
+  
+
+```{r stack models}
+## stack models
+stacked <- data.frame(pred_multinom,pred_tree,pred_rf,pred_lda, pred_gbm,validation_PC$classe)
+
+tic("fit rf model to stacked data")
+combModFit <- train(validation_PC.classe~., method="rf", data = stacked)
+toc()
+## predict classe values on validation set using stacked model
+combPred <- predict(combModFit, stacked)
+## check accuracy of stacked model
+confusionMatrix(combPred, stacked$validation_PC.classe)$overall
+
+## store out of sample accuracy
+out_sample_accuracy <- confusionMatrix(combPred, stacked$validation_PC.classe)$overall[['Accuracy']]
+
+```
+  
+
+
+### **Load test set**  
+  
+```{r load test set}
+
+test <- read.csv(file = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",stringsAsFactors = FALSE,na.strings=c("","NA"))
+
+dim(test)
+
+
+unique(test$user_name)
+"classe" %in% names(test)
+
+
+
+
+```
+  
+### **Preprocess test set**  
+
+
+```{r preprocess test set to match training and validation sets}
+
+## omit the same columns from test 
+test <- test[ ,which(names(test) %in% names(training))]
+
+## preprocess using the PreProc object used on training set
+test_PC <- predict(preProc, test) 
+```
+
+### **Create stacked model against test set**  
+  
+  
+```{r create stacked model against test set}
+## stack models
+pred_test_multinom <- predict(modFit_multinom, test_PC)
+pred_test_tree <- predict(modFit_tree, test_PC)
+pred_test_lda <- predict(modFit_lda, test_PC)
+pred_test_rf <- predict(modFit_rf, test_PC)
+pred_test_gbm <- predict(modFit_gbm, test_PC)
+
+
+## note that, for combModFit to work, the names must match those used in stacked
+stacked_test <- data.frame("pred_multinom" = pred_test_multinom,
+                           "pred_tree"= pred_test_tree,
+                           "pred_lda"= pred_test_lda,
+                           "pred_rf" = pred_test_rf, 
+                           "pred_gbm"= pred_test_gbm)
+```
+
+### **Make predictions against test set using stacked model**  
+  
+Based on the validation set, the **expected out of sample accuracy for the stacked model is `r round(100*out_sample_accuracy, digits = 1)`%**  
+    
+
+```{r make final predictions against test set}
+combPred_test <- predict(combModFit, stacked_test)
+
+## put into a table
+formattable(data.frame("ID" = test$X, "Predicted_classe" = combPred_test))
+
+```
+
+  
+  
+  
