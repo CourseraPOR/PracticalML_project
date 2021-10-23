@@ -67,16 +67,13 @@ Class A corresponds to the specified execution of the exercise, while the other 
 
 * Model building:  
   
-  * Create multiple models to predict *classe* using training set  
-    * Use repeated cross-validation (5 repeats of 5-fold cross-validation)  
+  * Train random forest model to predict *classe* using training set  
 
-  * Create a stacked (ensemble) model that incorporates all models  
-  
 * Model evaluation:  
   
   * Preprocess validation set in same way as training set  
   
-  * Use stacked model to make predictions on validation set  
+  * Use trained model to make predictions on validation set  
 
   * Estimate out of sample accuracy based on predictions against validation set  
   
@@ -86,9 +83,9 @@ Class A corresponds to the specified execution of the exercise, while the other 
 
 ** Preprocess test data in same way as training data  
 
-** Make predictions on test data using each model fit  
+** Make predictions on test data using model  
 
-** Combine predictions using the combined model fit  
+
 
 ### **Load data**  
   
